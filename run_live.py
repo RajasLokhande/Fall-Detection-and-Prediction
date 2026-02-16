@@ -12,8 +12,8 @@ UDP_PORT = 4210
 MODEL_FILE = "fall_model.pkl"
 
 # --- TELEGRAM CONFIGURATION (FIXED) ---
-TELEGRAM_TOKEN = "8204651514:AAFj5t0KqzzPXtAKfIdhKp1ipnWKH9yIGHY"
-TELEGRAM_CHAT_ID = "5754226279"
+TELEGRAM_TOKEN = "YOUR TOKEN HERE"
+TELEGRAM_CHAT_ID = "YOUR TOKEN HERE"
 
 
 def send_telegram_notification(confidence):
@@ -111,4 +111,5 @@ while True:
                         for _ in range(50): buffer.popleft()
 
     except Exception as e:
+
         print(f"Loop Error: {e}")
