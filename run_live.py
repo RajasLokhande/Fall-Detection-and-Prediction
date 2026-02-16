@@ -7,94 +7,108 @@ from collections import deque
 from datetime import datetime
 
 # --- CONFIGURATION ---
-UDP_IP = "0.0.0.0"  # Listens on all available network interfaces
-UDP_PORT = 4210  # Must match the port in your Arduino code
+UDP_IP = "0.0.0.0"
+UDP_PORT = 4210
 MODEL_FILE = "fall_model.pkl"
 
-# Blynk Config (Update token if you changed it)
-BLYNK_AUTH = "lcEfKwsoa_NLCfNmW3KWgomj4AL2f77sdsadp"
-BLYNK_URL = f"https://blynk.cloud/external/api/logEvent?token={BLYNK_AUTH}&code=fall_alert"
+# --- TELEGRAM CONFIGURATION (FIXED) ---
+TELEGRAM_TOKEN = "8204651514:AAFj5t0KqzzPXtAKfIdhKp1ipnWKH9yIGHY"
+TELEGRAM_CHAT_ID = "5754226279"
+
+
+def send_telegram_notification(confidence):
+    """Sends a formatted alert message to the caretaker via Telegram."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    message = (
+        f"🚨 *FALL DETECTED!*\n"
+        f"--------------------------\n"
+        f"🕒 *Time:* {timestamp}\n"
+        f"🎯 *AI Confidence:* {confidence:.1f}%\n"
+        f"📍 *Status:* Immediate attention required."
+    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        if response.status_code == 200:
+            print(f"✅ Telegram Alert Sent at {timestamp}")
+        else:
+            print(f"❌ Telegram API Error: {response.text}")
+    except Exception as e:
+        print(f"❌ Notification Failed: {e}")
+
 
 # --- INITIALIZATION ---
 print("🔄 Loading AI Model...")
 try:
     model = joblib.load(MODEL_FILE)
     print("✅ Model Loaded Successfully!")
-except:
-    print("❌ Error: fall_model.pkl not found! Please train the model first.")
+except Exception as e:
+    print(f"❌ Error: {e}")
     exit()
 
-# Buffer to store the sliding window of 200 samples (3-4 seconds of data)
+# Buffer for sliding window
 buffer = deque(maxlen=200)
-
-# Setup UDP Socket
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((UDP_IP, UDP_PORT))
+sock.setblocking(False)
+
 print(f"🚀 Server Listening on Port {UDP_PORT}...")
 
 last_alert_time = 0
 
 while True:
-    # Receive data from ESP32
-    data, addr = sock.recvfrom(1024)
-
     try:
-        # Decode the CSV string: "ax,ay,az"
-        payload = data.decode('utf-8').split(',')
-        if len(payload) == 3:
-            ax = float(payload[0])
-            ay = float(payload[1])
-            az = float(payload[2])
+        # 1. Non-blocking data receive
+        try:
+            data, addr = sock.recvfrom(1024)
+            payload = data.decode('utf-8').split(',')
+            if len(payload) == 3:
+                ax, ay, az = map(float, payload)
+                buffer.append([ax, ay, az])
+        except BlockingIOError:
+            continue
 
-            # Add new data to the sliding window
-            buffer.append([ax, ay, az])
+        # 2. Process when window is full
+        if len(buffer) == 200:
+            window_array = np.array(buffer)
 
-            # Wait until we have enough data to make a prediction
-            if len(buffer) == 200:
-                # 1. CALCULATE WINDOW MAGNITUDE
-                # This checks if there was ANY significant movement in the last 200 samples
-                window_array = np.array(buffer)
-                magnitudes = np.sqrt(np.sum(window_array ** 2, axis=1))
-                max_mag = np.max(magnitudes)
-                min_mag = np.min(magnitudes)
+            # Calculate Total Acceleration Magnitude: sqrt(x^2 + y^2 + z^2)
+            magnitudes = np.linalg.norm(window_array, axis=1)
+            max_mag = np.max(magnitudes)
+            min_mag = np.min(magnitudes)
 
-                # 2. THE MAGNITUDE GATE
-                # If the max force was > 1.5g or min force < 0.6g (freefall), then check AI
-                # Otherwise, it's just normal standing/sitting stillness.
-                if max_mag > 1.5 or min_mag < 0.6:
+            # 3. TRIGGER LOGIC
+            if max_mag > 2.0 or min_mag < 0.5:
 
-                    # Flatten the 2D window (200, 3) into a 1D vector (600,) for the model
-                    features = window_array.flatten().reshape(1, -1)
+                # Reshape for Scikit-Learn (1 sample, 600 features)
+                features = window_array.flatten().reshape(1, -1)
 
-                    # 3. PROBABILITY THRESHOLD
-                    # Get the confidence levels: [Prob_NoFall, Prob_Fall]
-                    probs = model.predict_proba(features)[0]
-                    fall_confidence = probs[1]
+                # Get probabilities
+                probs = model.predict_proba(features)[0]
+                fall_confidence = probs[1]
 
-                    # Only trigger if the AI is more than 85% sure it's a fall
-                    if fall_confidence > 0.85:
-                        current_time = time.time()
+                if fall_confidence > 0.50:  # Threshold for testing
+                    current_time = time.time()
 
-                        # Cooldown: Don't spam alerts (wait 10 seconds between notifications)
-                        if current_time - last_alert_time > 10:
-                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            print(f"⚠️ FALL DETECTED! Confidence: {fall_confidence * 100:.1f}% at {timestamp}")
+                    if current_time - last_alert_time > 10:
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"⚠️ FALL DETECTED! Confidence: {fall_confidence * 100:.1f}%")
 
-                            # A. Send signal back to ESP32 to light up LED
-                            sock.sendto(b"FALL", addr)
+                        # Send feedback to ESP32
+                        sock.sendto(b"FALL", addr)
 
-                            # B. Send Push Notification via Blynk
-                            try:
-                                requests.get(BLYNK_URL, timeout=2)
-                                print(f" -> Blynk Notification Sent!")
-                            except Exception as blynk_err:
-                                print(f" -> Blynk Error: {blynk_err}")
+                        # --- NEW NOTIFICATION PART ---
+                        send_telegram_notification(fall_confidence * 100)
 
-                            last_alert_time = current_time
-                            buffer.clear()  # Clear buffer after alert to reset the window
-                else:
-                    # Optional: Print "Status: Still" every few seconds if you want to see it working
-                    pass
+                        last_alert_time = current_time
+
+                        # Slide forward to avoid double-triggering
+                        for _ in range(50): buffer.popleft()
 
     except Exception as e:
-        print(f"Data Error: {e}")
+        print(f"Loop Error: {e}")
